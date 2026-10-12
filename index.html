@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>礦坑原型</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#07070a; }
+  body { font-family:"Microsoft JhengHei","PingFang TC",sans-serif; color:#e8e2d6; }
+  canvas { display:block; }
+
+  #hint {
+    position:fixed; left:50%; bottom:18px; transform:translateX(-50%);
+    background:rgba(10,10,14,.72); border:1px solid rgba(255,220,160,.18);
+    padding:9px 18px; border-radius:999px; font-size:13px; letter-spacing:.5px;
+    white-space:nowrap; pointer-events:none; backdrop-filter:blur(4px);
+  }
+  #hint b { color:#ffd79a; font-weight:600; }
+
+  #info {
+    position:fixed; right:16px; top:16px; text-align:right;
+    font-size:12px; line-height:1.7; color:#8d8878; pointer-events:none;
+  }
+  #info span { color:#ffd79a; }
+
+  #title {
+    position:fixed; left:20px; top:16px; pointer-events:none;
+  }
+  #title h1 { font-size:20px; font-weight:600; letter-spacing:2px; color:#f0e6d2; }
+  #title p  { font-size:11px; color:#7d7768; letter-spacing:1px; margin-top:3px; }
+
+  #mapbox {
+    position:fixed; left:20px; bottom:20px;
+    border:1px solid rgba(255,220,160,.18); border-radius:8px;
+    background:rgba(10,10,14,.65); padding:6px; backdrop-filter:blur(4px);
+  }
+  #minimap { display:block; border-radius:4px; }
+
+  #panel {
+    position:fixed; right:16px; bottom:20px;
+    background:rgba(10,10,14,.65); border:1px solid rgba(255,220,160,.18);
+    padding:8px 14px; border-radius:8px; font-size:12px; color:#c9c2b2;
+    backdrop-filter:blur(4px);
+  }
+  #panel input { vertical-align:middle; width:110px; margin-left:6px; }
+
+  #loading {
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:#07070a; font-size:14px; letter-spacing:3px; color:#6b6558; z-index:50;
+    transition:opacity .6s;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">進 入 礦 坑…</div>
+
+<div id="title">
+  <h1>礦坑原型</h1>
+  <p>STEP 2 · 挖礦與商店</p>
+</div>
+
+<div id="info">
+  座標 <span id="pos">0, 0</span><br>
+  FPS <span id="fps">--</span><br>
+  礦石 <span id="oreleft">0</span> 顆待挖
+</div>
+
+<div id="panel">
+  <button id="overview" style="background:#24354d;color:#ffe0ad;border:1px solid #65738a;border-radius:6px;padding:6px 10px;cursor:pointer">全景／跟隨</button>
+  <label>亮度 <input id="bright" type="range" min="40" max="200" value="100"></label>
+  <label>光暈 <input id="bloomAmt" type="range" min="0" max="200" value="100"></label>
+</div>
+
+<div id="mapbox"><canvas id="minimap" width="150" height="150"></canvas></div>
+
+<div id="hint">
+  <b>WASD</b> 移動　·　<b>Shift</b> 跑步　·　<b>E</b> 開採／商店　·　<b>滾輪</b> 遠近　·　<b>Z X</b> 轉鏡頭
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/loaders/GLTFLoader.js"></script>
+<!-- 後製（Bloom 光暈）用的程式庫 -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/postprocessing/MaskPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script src="models/reference_cavern_nav.js"></script>
+<script>
+/* ============================================================
+   礦坑原型 · STEP 1
+   目標：只驗證「操控角色在坑道裡走動」的手感。
+   還沒有挖礦、背包、敵人 —— 那些是後面的步驟。
+   ============================================================ */
+
+/* ---------- 全域狀態（跟《苦艾與甘露》一樣，都放在 G 裡面） ---------- */
+const G = {
+  overview: false,
+  cell: 0.75,
+  size: 85,
+  map: [],          // 0 = 可以走的地板, 1 = 石壁, 2 = 礦石
+  ores: [],         // 礦石位置清單（給小地圖用）
+  player: null,
+  vel: { x:0, z:0 },
+  camAngle: 0,      // 鏡頭水平轉角
+  focus: { x:0, z:0 },  // 鏡頭的注視點（平滑跟著角色，鏡頭本身永遠不轉向）
+  camDist: 0.95,    // 手機遊玩視距：讓人物和附近道路保持清楚
+  keys: {},
+  _frameFactor: 1,  // 幀率校正（以 60fps 為基準）
+  _last: performance.now(),
+  _fpsAcc: 0, _fpsCount: 0
+};
+
+/* ============================================================
+   0. 「固定的亂數」
+   地圖要每次都長一樣，就不能用 Math.random（它每次都不同）。
+   這個 rand() 是從固定的種子算出來的假亂數：看起來很隨機，
+   但只要種子一樣，產生的順序就永遠一模一樣 → 地圖固定。
+   ★ 想換一張新地圖？把下面的 MAP_SEED 改成別的數字就好。
+   （礦石位置刻意還是用 Math.random，所以每次玩都不一樣）
+   ============================================================ */
+const MAP_SEED = 20260910;
+let _seed = MAP_SEED;
+function rand() {
+  _seed |= 0; _seed = (_seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(_seed ^ (_seed >>> 15), 1 | _seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+/* ============================================================
+   1. 產生礦坑地圖
+   做法：整張地圖先全部塞滿石頭，再用「隨機亂走」的方式挖出坑道。
+   這樣挖出來的坑道彎彎曲曲，比整齊的格子更像礦坑。
+   ============================================================ */
+function generateMine() {
+  G.map=Array.from({length:G.size},()=>Array(G.size).fill(1));
+  const c=Math.floor(G.size/2);
+  CAVERN.cells.forEach(([x,z])=>{G.map[x+c][z+c]=0;});
+  for(let i=0;i<G.size;i++)for(let j=0;j<G.size;j++){
+    const x=toWorld(i),z=toWorld(j),b=CAVERN.bridge;
+    if(x>=b[0]&&x<=b[1]&&z>=b[2]&&z<=b[3])G.map[i][j]=0;
+  }
+  G.ores=[];
+  return;
+  const N = G.size;
+  const center = Math.floor(N / 2);
+
+  // 這個形狀與 fixed_mine_map.glb 完全相同；不使用亂數。
+  const ellipse = (x, z, cx, cz, rx, rz) =>
+    Math.pow((x - cx) / rx, 2) + Math.pow((z - cz) / rz, 2) <= 1;
+  const walkable = (x, z) => {
+    if (Math.abs(x) > 8 || Math.abs(z) > 13) return false;
+    return ellipse(x,z,0,-9,7,5.1) || ellipse(x,z,-0.8,0,7.4,4.8) ||
+           ellipse(x,z,0.3,9,7,4.5) || (Math.abs(x) <= 3 && z >= -9 && z <= 9) ||
+           (Math.abs(x + 1) <= 4 && z >= -4 && z <= 5) ||
+           ellipse(x,z,-5.2,5.2,3.2,3) || ellipse(x,z,5,-4.5,3,3.3);
+  };
+
+  for (let x = 0; x < N; x++) {
+    G.map[x] = [];
+    for (let z = 0; z < N; z++)
+      G.map[x][z] = walkable(x - center, z - center) ? 0 : 1;
+  }
+  G.ores = [];
+}
+
+/* 格子座標 <-> 世界座標 */
+function toWorld(i) { return (i - Math.floor(G.size / 2)) * G.cell; }
+function toGrid(v)  { return Math.round(v / G.cell + Math.floor(G.size / 2)); }
+
+/* ============================================================
+   2. 程式畫出來的貼圖（不用外部圖檔，所以雙擊就能跑）
+   之後你要換成自己畫的圖，只要把這幾個函式換成讀取 png 就好。
+   ============================================================ */
+function makeRockTexture(base, speck) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = base; g.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 2600; i++) {
+    const a = Math.random() * 0.16;
+    g.fillStyle = (Math.random() < 0.5 ? 'rgba(0,0,0,' : 'rgba(255,240,220,') + a + ')';
+    g.fillRect(Math.random()*128, Math.random()*128, 2 + Math.random()*3, 2 + Math.random()*3);
+  }
+  for (let i = 0; i < 26; i++) {           // 一些裂縫
+    g.strokeStyle = 'rgba(0,0,0,.22)'; g.lineWidth = 1;
+    g.beginPath();
+    let x = Math.random()*128, y = Math.random()*128;
+    g.moveTo(x, y);
+    for (let s = 0; s < 4; s++) { x += (Math.random()-.5)*34; y += (Math.random()-.5)*34; g.lineTo(x, y); }
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+/* ============================================================
+   3. 建立場景
+   ============================================================ */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0e16);
+// 霧：讓遠方自然變黑，礦坑的「看不見前方」就是靠這個
+scene.fog = new THREE.FogExp2(0x0d0e16, 0.0085);  // 數字越小＝看得越遠越亮
+
+const camera = new THREE.PerspectiveCamera(46, innerWidth / innerHeight, 0.5, 400);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+generateMine();
+
+/* --- 舊的程序式地板與岩壁保留在檔案裡作為備用，但不再建立 --- */
+if (false) {
+/* --- 地板 --- */
+const floorTex = makeRockTexture('#5b5145');
+floorTex.repeat.set(G.size, G.size);
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(G.size * G.cell, G.size * G.cell),
+  new THREE.MeshStandardMaterial({ map: floorTex, roughness: 1 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+/* --- 石壁：用 InstancedMesh 一次畫幾千個方塊，效能才夠 --- */
+const wallTex = makeRockTexture('#6d5f50');
+const wallGeo = new THREE.BoxGeometry(G.cell, G.cell * 1.6, G.cell);
+const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, roughness: .95 });
+
+let wallCount = 0;
+for (let x = 0; x < G.size; x++)
+  for (let z = 0; z < G.size; z++) if (G.map[x][z] !== 0) wallCount++;   // 礦石格也是牆
+
+const walls = new THREE.InstancedMesh(wallGeo, wallMat, wallCount);
+walls.castShadow = walls.receiveShadow = true;
+{
+  const m = new THREE.Matrix4(); let i = 0;
+  for (let x = 0; x < G.size; x++)
+    for (let z = 0; z < G.size; z++) {
+      if (G.map[x][z] === 0) continue;
+      // 高低稍微亂一點，看起來比較像天然岩壁（用 rand，所以每次一樣）
+      const h = 0.85 + rand() * 0.4;
+      m.makeScale(1, h, 1);
+      m.setPosition(toWorld(x), G.cell * 1.6 * h / 2 - 0.4, toWorld(z));
+      walls.setMatrixAt(i++, m);
+    }
+}
+scene.add(walls);
+
+/* --- 礦石：會自己發光，所以在黑暗裡看得到（是天然的路標） --- */
+const oreGroup = new THREE.Group();
+const oreGeo = new THREE.IcosahedronGeometry(G.cell * 0.42, 0);
+G.ores.forEach(o => {
+  const warm = Math.random() < 0.35;
+  const mat = new THREE.MeshStandardMaterial({
+    color:    warm ? 0xffb457 : 0x6fe4ff,
+    emissive: warm ? 0xff8c1a : 0x27b8e0,
+    emissiveIntensity: 0.9,
+    roughness: 0.35, metalness: 0.3, flatShading: true
+  });
+  const mesh = new THREE.Mesh(oreGeo, mat);
+  // 從岩壁中心往坑道方向推半格，讓礦石卡在牆面上
+  mesh.position.set(
+    toWorld(o.x) + o.dx * G.cell * 0.46,
+    G.cell * 0.62,
+    toWorld(o.z) + o.dz * G.cell * 0.46
+  );
+  mesh.rotation.set(Math.random()*3, Math.random()*3, Math.random()*3);
+  oreGroup.add(mesh);
+});
+scene.add(oreGroup);
+document.getElementById('oreleft').textContent = G.ores.length;
+}
+
+/* --- 載入 Blender 製作的固定地圖與路燈 --- */
+const oreGroup = new THREE.Group();
+scene.add(oreGroup);
+document.getElementById('oreleft').textContent = '0';
+
+const gltfLoader = new THREE.GLTFLoader();
+gltfLoader.load('models/reference_cavern.glb', gltf => {
+  const fixedMap = gltf.scene;
+  fixedMap.name = '固定礦坑地圖';
+  fixedMap.traverse(obj => {
+    if (obj.isMesh) {
+      obj.castShadow = obj.name.indexOf('Floor') < 0;
+      obj.receiveShadow = true;
+      if (obj.name === 'Walls_Collision') obj.visible = false;
+    }
+  });
+  scene.add(fixedMap);
+  if(typeof applyCavernMaterials==='function')applyCavernMaterials(fixedMap);
+  if(typeof applyConceptLightingMaterials==='function')applyConceptLightingMaterials(fixedMap);
+  document.getElementById('loading')?.remove();
+}, undefined, err => console.error('固定地圖載入失敗', err));
+
+if(false){
+gltfLoader.load('models/stylized_mine_lamp.glb', gltf => {
+  const placements = [
+    { x:-8, z:-12, r:0 }, { x:7, z:-6, r:Math.PI },
+    { x:-7, z:3, r:0 }, { x:7, z:9, r:Math.PI }
+  ];
+  placements.forEach(p => {
+    const lampModel = gltf.scene.clone(true);
+    lampModel.position.set(p.x, 0, p.z);
+    lampModel.rotation.y = p.r;
+    lampModel.scale.setScalar(0.82);
+    lampModel.traverse(obj => {
+      if (obj.isMesh) { obj.castShadow = true; obj.receiveShadow = true; }
+      if (obj.isLight) {
+        obj.intensity = 2.2;
+        obj.distance = 12;
+        obj.decay = 2;
+        obj.castShadow = false;
+      }
+    });
+    scene.add(lampModel);
+  });
+}, undefined, err => console.error('路燈模型載入失敗', err));
+}
+CAVERN.lamps.forEach(([x,z])=>{
+ const light=new THREE.PointLight(0xffb553,3.8,10,2);light.position.set(x,2.1,z);scene.add(light);
+});
+const depth=new THREE.Mesh(new THREE.PlaneGeometry(90,110),new THREE.MeshBasicMaterial({color:0x102b52}));
+depth.rotation.x=-Math.PI/2;depth.position.y=-7.8;scene.add(depth);
+
+/* --- 角色：圓潤粉嫩的小鼴鼠礦工（依角色定稿圖製作） --- */
+const player = new THREE.Group();
+{
+  const fur = new THREE.MeshStandardMaterial({ color:0x8f574f, roughness:.76 });
+  const cream = new THREE.MeshStandardMaterial({ color:0xdca78e, roughness:.78 });
+  const pink = new THREE.MeshStandardMaterial({ color:0xd85f70, roughness:.70 });
+  const noseMat = new THREE.MeshStandardMaterial({ color:0xdf5668, roughness:.62 });
+  const dark = new THREE.MeshStandardMaterial({ color:0x17151b, roughness:.30 });
+  const claw = new THREE.MeshStandardMaterial({ color:0xe8b59d, roughness:.64 });
+  const helmetMat = new THREE.MeshStandardMaterial({ color:0xf0c552, roughness:.46, metalness:.04 });
+  const helmetDark = new THREE.MeshStandardMaterial({ color:0x9a7244, roughness:.68 });
+  const scarfMat = new THREE.MeshStandardMaterial({ color:0x4d8790, roughness:.74, side:THREE.DoubleSide });
+  const beltMat = new THREE.MeshStandardMaterial({ color:0x76503d, roughness:.78 });
+  const buckleMat = new THREE.MeshStandardMaterial({ color:0xc99b48, roughness:.45, metalness:.18 });
+  const lampMat = new THREE.MeshStandardMaterial({
+    color:0xffe9a0, emissive:0xffa62f, emissiveIntensity:2.1, roughness:.25
+  });
+
+  const sphere = (radius, material, x, y, z, sx=1, sy=1, sz=1) => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(radius, 22, 16), material);
+    m.position.set(x,y,z); m.scale.set(sx,sy,sz); player.add(m); return m;
+  };
+
+  // 小身體、大腦袋，以及乾淨的奶油色臉部與肚皮。
+  const body = sphere(.78, fur, 0, 1.05, 0, .88, 1.02, .78);
+  sphere(.62, cream, 0, 1.07, .58, .73, .88, .18);
+  const head = sphere(1.12, fur, 0, 2.28, .10, 1, .93, .94);
+  sphere(.90, cream, 0, 2.14, .91, .82, .62, .19);
+
+  // 圓亮眼睛、大粉鼻；刻意不加門牙，保持定稿圖的柔和表情。
+  sphere(.125, dark, -.42, 2.48, 1.05, 1, 1.10, .55);
+  sphere(.125, dark,  .42, 2.48, 1.05, 1, 1.10, .55);
+  const eyeShine = new THREE.MeshBasicMaterial({ color:0xffffff });
+  sphere(.034, eyeShine, -.385, 2.525, 1.115);
+  sphere(.034, eyeShine,  .455, 2.525, 1.115);
+  sphere(.28, noseMat, 0, 2.20, 1.28, 1.12, .78, .86);
+
+  // 加大的奶油黃礦工帽，輪廓在俯視手機畫面中也很清楚。
+  const helmet = new THREE.Mesh(
+    new THREE.SphereGeometry(1.17, 24, 14, 0, Math.PI*2, 0, Math.PI/2), helmetMat
+  );
+  helmet.position.set(0, 2.95, .05); helmet.scale.z=.94; player.add(helmet);
+  const brim = new THREE.Mesh(new THREE.CylinderGeometry(1.24,1.24,.14,28), helmetMat);
+  brim.position.set(0,2.95,.07); player.add(brim);
+  const strap = new THREE.Mesh(new THREE.BoxGeometry(1.70,.13,.08), helmetDark);
+  strap.position.set(0,3.08,.91); player.add(strap);
+  const lampHouse = new THREE.Mesh(new THREE.CylinderGeometry(.21,.24,.27,16), helmetDark);
+  lampHouse.rotation.x=Math.PI/2; lampHouse.position.set(0,3.25,1.03); player.add(lampHouse);
+  sphere(.155, lampMat, 0, 3.25, 1.19, 1, 1, .62);
+
+  // 藍綠色領巾：頸圈、正面三角布與背後的小結。
+  const scarfRing = new THREE.Mesh(new THREE.TorusGeometry(.56,.095,10,28), scarfMat);
+  scarfRing.rotation.x=Math.PI/2; scarfRing.position.set(0,1.66,.02); player.add(scarfRing);
+  const scarfShape = new THREE.Shape();
+  scarfShape.moveTo(-.48,.15); scarfShape.lineTo(.48,.15); scarfShape.lineTo(.03,-.48); scarfShape.closePath();
+  const scarfFront = new THREE.Mesh(new THREE.ShapeGeometry(scarfShape), scarfMat);
+  scarfFront.position.set(0,1.62,.70); player.add(scarfFront);
+  sphere(.14, scarfMat, 0,1.66,-.62,1.15,.85,.80);
+  const scarfTailGeo = new THREE.ConeGeometry(.13,.46,12);
+  [-1,1].forEach(side=>{
+    const tail=new THREE.Mesh(scarfTailGeo,scarfMat);
+    tail.position.set(side*.13,1.43,-.65); tail.rotation.z=side*.24; player.add(tail);
+  });
+
+  // 棕色腰帶、黃銅扣與側邊小工具袋。
+  const belt = new THREE.Mesh(new THREE.CylinderGeometry(.68,.68,.16,24,1,true),beltMat);
+  belt.position.set(0,.91,0); player.add(belt);
+  const buckle = new THREE.Mesh(new THREE.BoxGeometry(.27,.22,.09),buckleMat);
+  buckle.position.set(0,.91,.68); player.add(buckle);
+  sphere(.25,beltMat,-.61,.91,.25,.86,.82,.42);
+  const pouchFlap = new THREE.Mesh(new THREE.BoxGeometry(.31,.11,.08),buckleMat);
+  pouchFlap.position.set(-.61,1.02,.45); pouchFlap.rotation.z=-.08; player.add(pouchFlap);
+
+  // 小手臂配粉色圓掌與短爪，走路時保留原本的擺動。
+  const armGeo = new THREE.SphereGeometry(.30,20,14);
+  const clawGeo = new THREE.ConeGeometry(.052,.22,10);
+  const arms=[];
+  [-1,1].forEach(side=>{
+    const arm=new THREE.Group(); arm.position.set(side*.60,1.38,.20);
+    const a=new THREE.Mesh(armGeo,fur); a.scale.set(.70,1.05,.68); a.rotation.z=side*-.34; arm.add(a);
+    const paw=new THREE.Mesh(new THREE.SphereGeometry(.25,18,12),pink);
+    paw.position.set(side*.12,-.27,.31); paw.scale.set(1,.72,.88); arm.add(paw);
+    for(let i=-1;i<=1;i++){
+      const c=new THREE.Mesh(clawGeo,claw); c.rotation.x=Math.PI/2;
+      c.position.set(side*.12+i*.075,-.29,.53); arm.add(c);
+    }
+    player.add(arm); arms.push(arm);
+  });
+
+  // 短腿和粉嫩腳掌，避免過大的腳破壞「頭大身體小」的比例。
+  const legs=[];
+  [-1,1].forEach(side=>{
+    const leg=new THREE.Group(); leg.position.set(side*.30,.49,.02);
+    const l=new THREE.Mesh(new THREE.SphereGeometry(.30,18,12),fur);
+    l.scale.set(.78,.86,.72); leg.add(l);
+    const foot=new THREE.Mesh(new THREE.SphereGeometry(.27,18,12),pink);
+    foot.position.set(0,-.22,.25); foot.scale.set(.96,.48,1.15); leg.add(foot);
+    player.add(leg); legs.push(leg);
+  });
+
+  // 從背後看得到的小圓尾巴。
+  sphere(.18,fur,0,.82,-.67,1,1,1.25);
+
+  player.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
+  player.userData.legs = legs;
+  player.userData.arms = arms;
+  player.userData.body = body;
+  player.userData.head = head;
+  player.userData.bodyBaseY = 1.05;
+  player.userData.headBaseY = 2.28;
+  player.userData.bodyBaseScale = body.scale.clone();
+  player.userData.walkBlend = 0;
+  legs.forEach(leg=>leg.userData.restPosition=leg.position.clone());
+  arms.forEach(arm=>arm.userData.restPosition=arm.position.clone());
+
+  // 十字鎬掛點跟著右手臂一起動；模型載入後會放進這個容器。
+  const pickaxeMount = new THREE.Group();
+  pickaxeMount.name = '右手十字鎬掛點';
+  pickaxeMount.position.set(.13,-.27,.31);
+  pickaxeMount.rotation.z = -.58;
+  arms[1].add(pickaxeMount);
+  player.userData.pickaxeMount = pickaxeMount;
+}
+player.scale.setScalar(.60);
+player.position.set(CAVERN.spawn[0],0,CAVERN.spawn[1]);
+G.focus.x=player.position.x;G.focus.z=player.position.z;
+scene.add(player);
+G.player = player;
+
+/* --- 四階十字鎬：依商店目前裝備自動切換，並跟著右手擺動 --- */
+G.pickaxeModels = [];
+G.currentPickaxeTier = 0;
+G.setPickaxeTier = tier => {
+  G.currentPickaxeTier = Math.max(0,Math.min(3,Number(tier)||0));
+  G.pickaxeModels.forEach((model,i)=>{ if(model) model.visible = i === G.currentPickaxeTier; });
+};
+[
+  'assets/models/pickaxes/pickaxe_wood.glb',
+  'assets/models/pickaxes/pickaxe_stone.glb',
+  'assets/models/pickaxes/pickaxe_iron.glb',
+  'assets/models/pickaxes/pickaxe_gold.glb'
+].forEach((path,tier)=>{
+  gltfLoader.load(path,gltf=>{
+    const model=gltf.scene;
+    model.name=['木製十字鎬','石製十字鎬','鐵製十字鎬','金製十字鎬'][tier];
+    // GLB 匯出時已由 Blender 的 Z-up 轉成遊戲的 Y-up；再繞直立軸轉 90°，
+    // 讓鎬頭尖端落在手臂的前後揮擊平面，而不是拿鎬頭側面掃過礦物。
+    model.scale.setScalar(.76);
+    model.rotation.set(0,Math.PI/2,0);
+    // 模型的共同握持點在柄底上方 0.72，對齊粉色右掌中心。
+    model.position.set(0,-.55,.48);
+    model.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
+    model.visible=tier===G.currentPickaxeTier;
+    G.pickaxeModels[tier]=model;
+    player.userData.pickaxeMount.add(model);
+  },undefined,err=>console.error('十字鎬模型載入失敗：'+path,err));
+});
+G.setPickaxeTier(0);
+
+/* --- 燈光 --- */
+const ambient = new THREE.AmbientLight(0x9aa8c8, 1.05);   // 環境光：整體基礎亮度
+scene.add(ambient);
+
+// 從上方灑下來的微光，讓岩壁有明暗、不會扁平
+const sky = new THREE.DirectionalLight(0xbfd0f0, 0.45);
+sky.position.set(-8, 20, 6);
+scene.add(sky);
+
+// 頭燈：跟著角色，朝著角色面對的方向照
+const lamp = new THREE.SpotLight(0xffe0b0, 2.4, 60, Math.PI / 4.0, 0.6, 1.0);
+lamp.castShadow = true;
+lamp.shadow.mapSize.set(1024, 1024);
+lamp.shadow.camera.near = 1; lamp.shadow.camera.far = 45;
+lamp.shadow.bias = -0.0015;
+lamp.shadow.normalBias = 0.06;
+scene.add(lamp, lamp.target);
+
+// 角色身上的暖光暈，讓自己不會黑成一團
+const glow = new THREE.PointLight(0xffc48c, 1.5, 30, 2);
+glow.position.y = 3.2;
+player.add(glow);
+
+/* --- 亮度滑桿：一次調環境光、頭燈和霧的濃度 --- */
+document.getElementById('bright').addEventListener('input', e => {
+  const k = e.target.value / 100;              // 1.0 = 目前的預設亮度
+  ambient.intensity = 1.05 * k;
+  sky.intensity     = 0.45 * k;
+  lamp.intensity    = 2.4  * k;
+  glow.intensity    = 1.5  * k;
+  scene.fog.density = 0.0085 / Math.max(0.5, k);  // 越亮，霧越淡、看得越遠
+});
+
+/* ============================================================
+   4. 操作
+   ============================================================ */
+addEventListener('keydown', e => { G.keys[e.code] = true;  });
+addEventListener('keyup',   e => { G.keys[e.code] = false; });
+addEventListener('blur',    () => { G.keys = {}; });        // 切走視窗時放開所有鍵
+document.getElementById('overview').onclick=()=>{G.overview=!G.overview;};
+addEventListener('wheel', e => {
+  G.camDist = Math.max(0.55, Math.min(2.6, G.camDist + (e.deltaY > 0 ? 0.08 : -0.08)));
+}, { passive: true });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ============================================================
+   5. 碰撞：不讓角色走進石頭裡
+   做法很簡單 —— 分開檢查 X 和 Z 兩個方向，
+   哪個方向會撞牆就取消哪個方向的移動（所以貼著牆走還是很順）。
+   ============================================================ */
+const RADIUS = 0.48;
+function blocked(wx, wz) {
+  const b=CAVERN.bridge;
+  const inside=(x,z)=>{
+    if(x>=b[0]&&x<=b[1]&&z>=b[2]&&z<=b[3])return true;
+    return G.map[toGrid(x)]?.[toGrid(z)]===0;
+  };
+  for(let k=0;k<12;k++){
+    const a=k*Math.PI/6;
+    if(!inside(wx+Math.cos(a)*RADIUS,wz+Math.sin(a)*RADIUS))return true;
+  }
+  if(CAVERN.obstacles.some(o=>Math.hypot(wx-o.x,wz-o.z)<RADIUS+o.r))return true;
+  return false;
+  const half = G.cell / 2;
+  const gx = toGrid(wx), gz = toGrid(wz);
+  for (let dx = -1; dx <= 1; dx++)
+    for (let dz = -1; dz <= 1; dz++) {
+      const cx = gx + dx, cz = gz + dz;
+      if (cx < 0 || cz < 0 || cx >= G.size || cz >= G.size) return true;
+      if (G.map[cx][cz] === 0) continue;                       // 地板，可以走
+      const px = toWorld(cx), pz = toWorld(cz);
+      if (Math.abs(wx - px) < half + RADIUS && Math.abs(wz - pz) < half + RADIUS) return true;
+    }
+  return false;
+}
+
+/* ============================================================
+   6. 每一格畫面
+   ============================================================ */
+let walkPhase = 0;
+
+function tick(now) {
+  requestAnimationFrame(tick);
+
+  /* --- 幀率校正：不管螢幕是 60Hz 還是 144Hz，走路速度都一樣 --- */
+  const dt = now - G._last; G._last = now;
+  G._frameFactor = Math.min(3, Math.max(0.2, dt / (1000 / 60)));
+  const f = G._frameFactor;
+
+  /* --- 鏡頭轉角（Q / E） --- */
+  if (G.keys['KeyZ']) G.camAngle += 0.025 * f;   // E 鍵讓給「開採」用，轉鏡頭改成 Z / X
+  if (G.keys['KeyX']) G.camAngle -= 0.025 * f;
+
+  /* --- 讀取方向鍵，換算成「螢幕上的方向」 --- */
+  let ix = 0, iz = 0;
+  if (G.keys['KeyW'] || G.keys['ArrowUp'])    iz -= 1;
+  if (G.keys['KeyS'] || G.keys['ArrowDown'])  iz += 1;
+  if (G.keys['KeyA'] || G.keys['ArrowLeft'])  ix -= 1;
+  if (G.keys['KeyD'] || G.keys['ArrowRight']) ix += 1;
+
+  const running = G.keys['ShiftLeft'] || G.keys['ShiftRight'] || G.moveRun;
+  const speed = (running ? 0.19 : 0.105) * f;
+
+  let mx = 0, mz = 0;
+  if (G.moveDir) {
+    // 點擊移動：mobile.js 已經算好世界座標的方向，直接照著走
+    mx = G.moveDir.x * speed;
+    mz = G.moveDir.z * speed;
+    ix = mx; iz = mz;                            // 讓下面知道「現在正在移動」
+  } else if (ix || iz) {
+    const len = Math.hypot(ix, iz);              // 斜走不會比較快
+    ix /= len; iz /= len;
+    const ca = Math.cos(G.camAngle), sa = Math.sin(G.camAngle);
+    mx = (ix * ca + iz * sa) * speed;            // 依鏡頭角度旋轉
+    mz = (iz * ca - ix * sa) * speed;
+  }
+
+  /* --- 加速／減速，讓移動有點重量感（不是硬邦邦的開關） --- */
+  const accel = 0.22 * f, friction = Math.pow(0.80, f);
+  G.vel.x += (mx - G.vel.x) * accel;
+  G.vel.z += (mz - G.vel.z) * accel;
+  if (!ix && !iz) { G.vel.x *= friction; G.vel.z *= friction; }
+
+  /* --- 分軸推進 + 撞牆檢查 --- */
+  const p = player.position;
+  if (!blocked(p.x + G.vel.x, p.z)) p.x += G.vel.x; else G.vel.x = 0;
+  if (!blocked(p.x, p.z + G.vel.z)) p.z += G.vel.z; else G.vel.z = 0;
+
+  /* --- 角色轉向：慢慢轉過去，不要瞬間翻面 ---
+     開採時要轉身面向那顆礦石，十字鎬的尖端才會朝著礦物敲；
+     以前只看移動方向，所以停下來開採時常常是側對著礦石揮空。 */
+  const moving = Math.hypot(G.vel.x, G.vel.z);
+  const diggingOre = (window.P && window.P.mining) ? window.P.mining : null;
+  let faceTarget = null;
+  if (diggingOre)        faceTarget = Math.atan2(diggingOre.x - p.x, diggingOre.z - p.z);
+  else if (moving > .01) faceTarget = Math.atan2(G.vel.x, G.vel.z);
+  if (faceTarget !== null) {
+    let diff = faceTarget - player.rotation.y;
+    while (diff >  Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    player.rotation.y += diff * Math.min(1, (diggingOre ? .30 : .22) * f);
+  }
+
+  /* --- 小鼴鼠走路循環 -------------------------------------------
+     先把速度平滑成 0~1，起步和停步才不會突然抽動。
+     左右腳輪流向前並抬起，身體每一步輕彈兩次；手臂反向擺動。
+     整隻角色只有很小的左右傾斜，因此帽子與十字鎬也會帶一點慣性。 */
+  const walkTarget = Math.min(1,moving/.075);
+  player.userData.walkBlend += (walkTarget-player.userData.walkBlend)*Math.min(1,.16*f);
+  const walkBlend = player.userData.walkBlend;
+  walkPhase += (.17+(running?.055:0))*f*walkBlend;
+  const stride = Math.sin(walkPhase);
+  const bounce = .5-.5*Math.cos(walkPhase*2);
+  const legSwing = stride*.62*walkBlend;
+  const armSwing = stride*.48*walkBlend;
+  const leftLeg=player.userData.legs[0], rightLeg=player.userData.legs[1];
+  leftLeg.rotation.x=legSwing;
+  rightLeg.rotation.x=-legSwing;
+  leftLeg.position.y=leftLeg.userData.restPosition.y+Math.max(0,stride)*.13*walkBlend;
+  rightLeg.position.y=rightLeg.userData.restPosition.y+Math.max(0,-stride)*.13*walkBlend;
+  leftLeg.position.z=leftLeg.userData.restPosition.z+stride*.12*walkBlend;
+  rightLeg.position.z=rightLeg.userData.restPosition.z-stride*.12*walkBlend;
+  player.userData.arms[0].rotation.x=-armSwing;
+  const miningNow = !!(window.P && window.P.mining);
+  // 開採時加大向前下方的行程，讓十字鎬尖端確實落向礦物。
+  if (miningNow) {
+    // 前 62% 蓄力抬鎬，後 38% 快速落下；phase 歸零的瞬間就是實際撞擊點。
+    const phase = Math.max(0, Math.min(.999, Number(window.P.swingPhase) || 0));
+    let swing;
+    if (phase < .62) {
+      const q = phase / .62;
+      swing = .25 + (-1.00 - .25) * (1 - Math.pow(1 - q, 2));
+    } else {
+      const q = (phase - .62) / .38;
+      swing = -1.00 + (.82 + 1.00) * q * q;
+    }
+    player.userData.arms[1].rotation.x = swing;
+  } else {
+    player.userData.arms[1].rotation.x = armSwing;
+  }
+  const idle = Math.sin(now * .0022);
+  const bodyScale=player.userData.bodyBaseScale;
+  player.userData.body.position.y=player.userData.bodyBaseY+idle*.012*(1-walkBlend)+bounce*.022*walkBlend;
+  player.userData.head.position.y=player.userData.headBaseY;
+  player.userData.body.scale.set(
+    bodyScale.x*(1+bounce*.025*walkBlend),
+    bodyScale.y*(1-bounce*.030*walkBlend),
+    bodyScale.z*(1+bounce*.025*walkBlend)
+  );
+  player.userData.body.rotation.z=-stride*.045*walkBlend;
+  player.rotation.z=-stride*.025*walkBlend;
+  player.position.y=bounce*.10*walkBlend;
+
+  /* --- 頭燈跟著臉的方向 --- */
+  lamp.position.set(p.x, 2.42 + p.y, p.z);
+  lamp.target.position.set(
+    p.x + Math.sin(player.rotation.y) * 14,
+    0.5,
+    p.z + Math.cos(player.rotation.y) * 14
+  );
+
+  /* --- 鏡頭：只平移，絕對不轉向 ---------------------------------
+     會頭暈的原因是：鏡頭慢慢追上去、卻同時盯著角色「當下」的位置，
+     一邊追一邊調整視線，畫面就會歪來歪去。
+     改法：先算一個平滑跟著角色的「注視點」focus，
+     鏡頭位置 = focus + 固定偏移量，再看向同一個 focus。
+     位置和注視點永遠差同一段距離 → 鏡頭角度完全不變，
+     畫面只會左右上下滑動，不會旋轉。                              */
+  const d = G.camDist;
+  const lag = Math.min(1, 0.12 * f);
+  G.focus.x += (p.x - G.focus.x) * lag;
+  G.focus.z += (p.z - G.focus.z) * lag;
+
+  const offX = Math.sin(G.camAngle) * -17 * d;
+  const offZ = Math.cos(G.camAngle) *  17 * d;
+  camera.position.set(G.focus.x + offX, 25 * d, G.focus.z + offZ);   // 25 = 鏡頭高度，越大越像從正上方往下看
+  G.mineShake = Math.max(0, (G.mineShake || 0) - .018 * f);
+  if (!G.overview && G.mineShake > .001) {
+    camera.position.x += (Math.random() - .5) * G.mineShake;
+    camera.position.y += (Math.random() - .5) * G.mineShake * .48;
+    camera.position.z += (Math.random() - .5) * G.mineShake;
+  }
+  camera.lookAt(G.focus.x, 1.8, G.focus.z);
+  if(G.overview){
+    const fit=Math.max(1,.8/camera.aspect);
+    camera.position.set(7*fit,65*fit,42*fit);camera.lookAt(0,0,-2);
+  }
+
+  /* --- 礦石慢慢轉、慢慢閃 --- */
+  const t = now * 0.001;
+  oreGroup.children.forEach((o, i) => {
+    o.rotation.y += 0.004 * f;
+    o.material.emissiveIntensity = 0.75 + Math.sin(t * 1.6 + i) * 0.25;
+  });
+
+  drawMinimap();
+
+  /* --- 右上角資訊 --- */
+  G._fpsAcc += 1000 / dt; G._fpsCount++;
+  if (G._fpsCount >= 20) {
+    document.getElementById('fps').textContent = Math.round(G._fpsAcc / G._fpsCount);
+    G._fpsAcc = 0; G._fpsCount = 0;
+    document.getElementById('pos').textContent = toGrid(p.x) + ', ' + toGrid(p.z);
+  }
+
+  renderer.render(scene, camera);
+}
+
+/* ============================================================
+   7. 小地圖
+   ============================================================ */
+const mm = document.getElementById('minimap').getContext('2d');
+function drawMinimap() {
+  const R = 17, S = 150 / (R * 2 + 1);
+  const gx = toGrid(G.player.position.x), gz = toGrid(G.player.position.z);
+  mm.clearRect(0, 0, 150, 150);
+  for (let dx = -R; dx <= R; dx++)
+    for (let dz = -R; dz <= R; dz++) {
+      const x = gx + dx, z = gz + dz;
+      if (x < 0 || z < 0 || x >= G.size || z >= G.size) continue;
+      const v = G.map[x][z];
+      if (v === 1) continue;
+      mm.fillStyle = v === 2 ? '#6fe4ff' : '#48413a';
+      mm.fillRect((dx + R) * S, (dz + R) * S, S, S);
+    }
+  mm.fillStyle = '#ffd79a';
+  mm.beginPath(); mm.arc(75, 75, 3.2, 0, 7); mm.fill();
+}
+
+/* 開跑 */
+requestAnimationFrame(tick);
+</script>
+<script src="polish.js"></script>
+<script src="mining.js?v=text-trim-20261012"></script>
+<script src="mobile.js?v=text-trim-20261012"></script>
+<script src="look.js?v=text-trim-20261012"></script>
+<script src="camp.js?v=text-trim-20261012"></script>
+<script src="quality-pass.js"></script>
+<script src="detail-pass.js?v=text-trim-20261012"></script>
+<script src="audio.js?v=text-trim-20261012"></script>
+<script src="info.js"></script>
+</body>
+</html>
