@@ -53,10 +53,11 @@
   }
   #loading::before { content:""; position:absolute; inset:0; pointer-events:none;
     background:linear-gradient(180deg, rgba(3,7,18,.35), rgba(3,7,18,.12) 48%, rgba(3,7,18,.48)); }
+  #loading::after { content:""; position:absolute; left:0; right:0; bottom:0; height:38%; pointer-events:none;
+    background:linear-gradient(to bottom, transparent 0%, rgba(0,0,0,.34) 52%, rgba(0,0,0,.86) 100%); }
   #loading.is-done { opacity:0; pointer-events:none; }
-  .loading-card { position:relative; width:min(100%,340px); text-align:center;
-    padding:12px 14px; border-radius:14px; background:rgba(5,10,24,.68);
-    box-shadow:0 12px 42px rgba(0,0,0,.28); backdrop-filter:blur(5px); }
+  .loading-card { position:relative; z-index:1; width:min(100%,340px); text-align:center;
+    padding:12px 14px; }
   .loading-gem { font-size:28px; line-height:1; margin-bottom:5px; filter:drop-shadow(0 0 10px #65d8ff);
     animation:loading-float 2.3s ease-in-out infinite; }
   .loading-title { font-size:18px; font-weight:700; letter-spacing:.16em; text-shadow:0 2px 12px #090f21; }
